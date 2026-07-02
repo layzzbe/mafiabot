@@ -42,13 +42,23 @@ jobs:
 
       - name: SSH deploy (pull + rebuild backend + migrate + extract frontend)
         uses: appleboy/ssh-action@v1
+        env:
+          SUDO_PASS: ${{ secrets.DEPLOY_PASSWORD }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_PASSWORD }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: SUDO_PASS
           script: |
             set -e
+
+            # The deploy user has password-required sudo (group 'sudo', not
+            # NOPASSWD) and ssh-action runs with no tty, so plain `sudo` fails with
+            # "a terminal is required to authenticate". Feed the password on stdin
+            # via `sudo -S` (DEPLOY_PASSWORD forwarded as $SUDO_PASS through envs).
+            s() { echo "$SUDO_PASS" | sudo -S -p '' "$@"; }
+
             cd ~/apps/mafiabot
 
             # Pull latest code
@@ -128,12 +138,12 @@ jobs:
             echo "→ RoleConfig / EmojiConfig / Achievement seeds run automatically on startup"
 
             # Deploy frontend static files
-            sudo mkdir -p /var/www/mafia
-            sudo tar -xzf /tmp/frontend-dist.tar.gz -C /var/www/mafia
-            sudo chown -R www-data:www-data /var/www/mafia || true
+            s mkdir -p /var/www/mafia
+            s tar -xzf /tmp/frontend-dist.tar.gz -C /var/www/mafia
+            s chown -R www-data:www-data /var/www/mafia || true
             rm -f /tmp/frontend-dist.tar.gz
 
             # Reload nginx
-            sudo systemctl reload nginx || sudo nginx -s reload || true
+            s systemctl reload nginx || s nginx -s reload || true
 
             echo "✅ Deploy complete"
