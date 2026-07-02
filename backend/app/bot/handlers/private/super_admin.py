@@ -793,7 +793,7 @@ async def cb_broadcast_cancel(query: CallbackQuery) -> None:
     locale = await _get_sa_locale(query.from_user.id if query.from_user else 0)
     t = get_translator(locale)
     await query.answer(t("sa-broadcast-toast-cancelled"), show_alert=False)
-    if query.message is not None:
+    if isinstance(query.message, Message):
         with contextlib.suppress(Exception):
             await query.message.edit_text(t("sa-broadcast-cancelled-msg"))
 
@@ -820,7 +820,7 @@ async def cb_broadcast_choose_method(query: CallbackQuery) -> None:
         await query.answer(t("sa-broadcast-toast-invalid-message-id"), show_alert=True)
         return
 
-    if query.message is None:
+    if not isinstance(query.message, Message):
         await query.answer()
         return
 

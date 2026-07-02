@@ -147,4 +147,4 @@ class SandboxTranscriptEntry(Model):
         unique_together = (("session", "seq"),)
 
     def __str__(self) -> str:
-        return f"SandboxTranscript({self.session_id}, seq={self.seq}, type={self.type})"
+        return f"SandboxTranscript({self.session_id}, seq={self.seq}, type={self.type})"  # type: ignore[attr-defined]

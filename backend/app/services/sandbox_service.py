@@ -24,6 +24,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from loguru import logger
@@ -54,6 +55,9 @@ from app.db.models.group import (
 from app.services import game_service, transcript_store
 from app.services.recording_bot import SandboxBot, SandboxBotRegistry
 from app.services.transcript_store import FakeUser
+
+if TYPE_CHECKING:
+    from aiogram import Bot
 
 
 class SandboxError(Exception):
@@ -339,10 +343,15 @@ async def start_sandbox(session_id: UUID) -> SandboxSession:
     from app.bot.handlers.group.game import _on_phase_change
     from app.core.phases.manager import PhaseManager
 
-    async def _hook(s: GameState) -> None:
-        await _on_phase_change(bot, s)
+    # SandboxBot is a duck-typed stand-in for aiogram.Bot (see recording_bot
+    # module docstring); this module is the sole glue layer, so we cast at
+    # the engine boundary rather than teach the engine about SandboxBot.
+    engine_bot = cast("Bot", bot)
 
-    PhaseManager.start_for(bot=bot, group_id=session.fake_group_id, on_phase_change=_hook)
+    async def _hook(s: GameState) -> None:
+        await _on_phase_change(engine_bot, s)
+
+    PhaseManager.start_for(bot=engine_bot, group_id=session.fake_group_id, on_phase_change=_hook)
     _start_auto_loop_if_enabled(session)
 
     logger.info(
@@ -370,7 +379,7 @@ def _next_update_id() -> int:
     return 10**9 + _update_seq
 
 
-async def _ensure_runtime(session: SandboxSession) -> SandboxBot:
+async def _ensure_runtime(session: SandboxSession) -> Bot:
     """Rebuild the in-memory runtime (bot, phase loop, auto loop) for a
     RUNNING sandbox whose memory state was lost — typically after the
     backend process restarted.
@@ -379,10 +388,13 @@ async def _ensure_runtime(session: SandboxSession) -> SandboxBot:
     "no live bot instance" after a deploy, even though the Redis state
     and DB row are intact. Re-registering the SandboxBot and restarting
     the loops is idempotent and cheap.
+
+    Returns the SandboxBot typed as `Bot` — callers only pass it to the
+    engine / dispatcher, which speak `Bot` (see recording_bot docstring).
     """
-    bot = SandboxBotRegistry.get(session.fake_group_id)
-    if bot is not None:
-        return bot
+    existing = SandboxBotRegistry.get(session.fake_group_id)
+    if existing is not None:
+        return cast("Bot", existing)
 
     if session.status != SandboxStatus.RUNNING:
         raise SandboxError(f"sandbox {session.id} is {session.status.value} — start_sandbox first?")
@@ -409,16 +421,18 @@ async def _ensure_runtime(session: SandboxSession) -> SandboxBot:
     from app.bot.handlers.group.game import _on_phase_change
     from app.core.phases.manager import PhaseManager
 
-    async def _hook(s: GameState) -> None:
-        await _on_phase_change(bot, s)
+    engine_bot = cast("Bot", bot)
 
-    PhaseManager.start_for(bot=bot, group_id=session.fake_group_id, on_phase_change=_hook)
+    async def _hook(s: GameState) -> None:
+        await _on_phase_change(engine_bot, s)
+
+    PhaseManager.start_for(bot=engine_bot, group_id=session.fake_group_id, on_phase_change=_hook)
     _start_auto_loop_if_enabled(session)
     logger.info(
         f"Sandbox {session.id} runtime rebuilt — bot+loops re-registered "
         f"(likely after backend restart)"
     )
-    return bot
+    return engine_bot
 
 
 async def inject_callback(
@@ -468,7 +482,7 @@ async def inject_callback(
     )
     chat_type = "private" if chat_id == fake_user_id else "supergroup"
     chat = Chat(id=chat_id, type=chat_type)
-    msg = Message(message_id=message_id, date=int(time.time()), chat=chat, from_user=tg_user)
+    msg = Message(message_id=message_id, date=datetime.now(UTC), chat=chat, from_user=tg_user)
     cb = CallbackQuery(
         id=f"sandbox-{_next_update_id()}",
         from_user=tg_user,
@@ -542,7 +556,7 @@ async def inject_message(
     chat = Chat(id=chat_id, type=chat_type)
     msg = Message(
         message_id=await transcript_store.next_message_id(sandbox_id),
-        date=int(time.time()),
+        date=datetime.now(UTC),
         chat=chat,
         from_user=tg_user,
         text=text,
@@ -870,9 +884,10 @@ async def _submit_auto_actions(state: GameState, mode: str) -> None:
         if bot is not None and submitted:
             from app.bot.handlers.private.role_actions import _broadcast_role_atmosphere
 
+            engine_bot = cast("Bot", bot)
             for actor, action_kind in submitted:
                 try:
-                    await _broadcast_role_atmosphere(bot, state, actor, action_kind)
+                    await _broadcast_role_atmosphere(engine_bot, state, actor, action_kind)
                 except Exception as e:  # pragma: no cover — never let UI break the loop
                     logger.debug(f"auto-play atmosphere broadcast failed for {actor.role}: {e}")
         return

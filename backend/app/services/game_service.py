@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import time
 from datetime import UTC
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from aiogram import Bot
 
 from app.core.distribution import distribute_mvp_roles
 from app.core.redis_state import get_state_backend
@@ -352,7 +356,7 @@ async def finish_game(state: GameState, winner: Team | None) -> None:
         from app.services.game_end_dm import send_per_player_game_end_dm
 
         if bot_inst is not None:
-            await send_per_player_game_end_dm(bot_inst, state)
+            await send_per_player_game_end_dm(cast("Bot", bot_inst), state)
     except Exception as e:
         logger.exception(f"Game-end DM dispatch failed for game {state.id}: {e}")
 
