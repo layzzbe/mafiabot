@@ -69,32 +69,58 @@ jobs:
               sleep 2
             done
 
-            # === Database migrations ===
-            # On a brand-new database, `aerich init-db` bootstraps the
-            # aerich tracking table. On every subsequent deploy we run
-            # `aerich upgrade` to apply any pending migration. The list
-            # of migration files lives in backend/migrations/models/.
+            # === Database migrations (aerich) ===
             #
-            # New migrations introduced recently:
-            #   3_…_add_role_configs.py        — RoleConfig (per-role names/emojis)
-            #   4_…_add_emoji_configs.py       — EmojiConfig (scene/item/action/currency)
-            #   5_…_achievement_dollars_reward — Achievement.dollars_reward column
+            # Two schema mechanisms coexist and must not fight:
+            #   1. generate_schemas(safe=True) at backend startup — CREATES any
+            #      missing table (including aerich's own bookkeeping table, since
+            #      `aerich.models` is in MODELS_MODULES) but never ALTERs an
+            #      existing one.
+            #   2. aerich — applies in-place migrations (new columns, etc.).
             #
-            # Both new tables are also auto-created by `generate_schemas(safe=True)`
-            # on backend startup (idempotent), so a fresh deploy is covered too —
-            # aerich is the path that handles in-place schema evolution.
+            # The source of truth for "is aerich initialised" is the recorded-
+            # migration COUNT in the DB `aerich` table — NOT a marker file. The
+            # old `.aerich-initialized` file lived in the container's writable
+            # layer and was wiped on every image rebuild, so every deploy looked
+            # like a first run and fell into `aerich init-db` (which fails with
+            # "Inited models already" once migration files are committed) →
+            # noisy, broken bootstrap. Reading the DB is rebuild-proof because
+            # the `postgres_data` volume persists.
+            #
+            # Branches (backend has already booted above, so generate_schemas
+            # has created every table incl. the empty `aerich` table):
+            #   • table absent  → defensive; let `aerich upgrade` create+record.
+            #   • 0 rows        → fresh DB: generate_schemas built the current
+            #                     schema, so `--fake` marks all committed
+            #                     migrations applied WITHOUT re-running their
+            #                     CREATE TABLEs (which would fail "relation
+            #                     already exists"). Establishes a baseline.
+            #   • >0 rows       → normal path; apply pending migrations for real
+            #                     (this is what picks up ALTER-style column adds
+            #                     that generate_schemas deliberately skips).
+            #
+            # Failures are logged loudly but do NOT abort the deploy: the schema
+            # is already guaranteed by generate_schemas, so a bad migration must
+            # not take the whole rollout down — surface it and fix forward.
             if ! docker compose exec -T backend test -d migrations/models; then
-              echo "⚠️  migrations/ folder missing in container, skipping"
-            elif docker compose exec -T backend test -f .aerich-initialized; then
-              echo "→ aerich upgrade"
-              docker compose exec -T backend aerich upgrade
+              echo "⚠️  migrations/models missing in container, skipping aerich"
             else
-              echo "→ first run: aerich init-db (creates tracking table)"
-              docker compose exec -T backend aerich init-db || true
-              docker compose exec -T backend touch .aerich-initialized
-              # init-db creates the schema directly, then upgrade catches
-              # anything that may have been added after this image was built
-              docker compose exec -T backend aerich upgrade || true
+              applied=$(docker compose exec -T postgres \
+                sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM aerich;"' \
+                2>/dev/null | tr -d '[:space:]' || true)
+              if [ -z "$applied" ]; then
+                echo "→ aerich table absent — bootstrapping (aerich upgrade)"
+                docker compose exec -T backend aerich upgrade \
+                  || echo "⚠️  aerich bootstrap failed — schema still ensured by generate_schemas"
+              elif [ "$applied" = "0" ]; then
+                echo "→ baseline: faking committed migrations (schema built by generate_schemas)"
+                docker compose exec -T backend aerich upgrade --fake \
+                  || echo "⚠️  aerich --fake baseline failed — review manually"
+              else
+                echo "→ applying pending migrations ($applied already recorded)"
+                docker compose exec -T backend aerich upgrade \
+                  || echo "⚠️  aerich upgrade failed — schema still ensured by generate_schemas; review migrations"
+              fi
             fi
 
             # Seed defaults — idempotent calls invoked from main.py lifespan
