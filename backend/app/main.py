@@ -230,6 +230,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     setup_sentry()
     await init_db()
+
+    from app.services.game_service import recover_stale_active_games
+
+    await recover_stale_active_games()
+
     bot_instance, dp_instance = await setup_bot()
 
     polling_task: asyncio.Task | None = None

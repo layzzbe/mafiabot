@@ -676,3 +676,44 @@ async def cancel_game(state: GameState, reason: str = "cancelled") -> None:
 
     await delete_state(state.group_id)
     logger.info(f"{'Sandbox ' if sandbox else ''}Game {state.id} cancelled: {reason}")
+
+
+async def recover_stale_active_games() -> None:
+    """Clear active_game_id for users whose game is no longer in Redis.
+
+    If storage access fails, or if any game payload is corrupted,
+    swallows the error and does nothing.
+    """
+
+    from app.core.state import GameState
+    from app.db.models import User
+
+    try:
+        backend = get_state_backend()
+        keys = await backend.scan_match("mafia:game:*")
+        active_uuids: set[UUID] = set()
+        for k in keys:
+            raw = await backend.get(k)
+            if raw:
+                try:
+                    state = GameState.from_redis(raw)
+                    active_uuids.add(state.id)
+                except Exception as e:
+                    logger.error(f"Corrupted game state found at key {k}: {e}. Aborting recovery.")
+                    return
+    except Exception as e:
+        logger.error(f"Failed to scan active games for recovery: {e}")
+        return
+
+    try:
+        if active_uuids:
+            await (
+                User.filter(active_game_id__not_isnull=True)
+                .exclude(active_game_id__in=list(active_uuids))
+                .update(active_game_id=None)
+            )
+        else:
+            await User.filter(active_game_id__not_isnull=True).update(active_game_id=None)
+        logger.info("Stale active_game_id values cleared successfully.")
+    except Exception as e:
+        logger.error(f"Failed to clear stale active_game_ids: {e}")

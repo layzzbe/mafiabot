@@ -11,6 +11,7 @@ class StateBackend(Protocol):
     async def get(self, key: str) -> str | None: ...
     async def set(self, key: str, value: str) -> None: ...
     async def delete(self, key: str) -> None: ...
+    async def scan_match(self, match: str) -> list[str]: ...
 
 
 class MemoryBackend:
@@ -27,6 +28,11 @@ class MemoryBackend:
 
     async def delete(self, key: str) -> None:
         self._store.pop(key, None)
+
+    async def scan_match(self, match: str) -> list[str]:
+        import fnmatch
+
+        return [k for k in self._store if fnmatch.fnmatch(k, match)]
 
 
 class RedisBackend:
@@ -45,6 +51,9 @@ class RedisBackend:
 
     async def delete(self, key: str) -> None:
         await self._client.delete(key)
+
+    async def scan_match(self, match: str) -> list[str]:
+        return [k async for k in self._client.scan_iter(match=match, count=100)]
 
 
 _backend: StateBackend | None = None
